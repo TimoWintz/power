@@ -24,3 +24,5 @@ stravalib==0.10.2
 units==0.7
 urllib3==1.25.10
 Werkzeug==1.0.1
+jax==0.1.75
+jaxlib==0.1.52

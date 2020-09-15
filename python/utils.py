@@ -1,4 +1,4 @@
-import numpy as np
+import numpy as onp
 import requests
 from stravalib import Client
 import googlemaps
@@ -8,6 +8,12 @@ import ruptures as rpt
 from copy import deepcopy
 from scipy.optimize import bisect, least_squares, minimize, Bounds, NonlinearConstraint
 from pyowm import OWM
+
+from jax import numpy as np
+from jax import grad, jit
+# again, this only works on startup!
+from jax.config import config
+config.update("jax_enable_x64", True)
 
 class IGNAlti:
     max_slice = 20
@@ -116,7 +122,42 @@ class Segment:
         ign = IGNAlti(secret)
         ign.correct_elevation(self.points)
 
-# g_nominal_power_fn = jit(grad(nominal_power_fn, 0))
+min_speed = 0.1
+def _total_time(lengths, speed):
+    return np.sum(lengths / speed)
+
+total_time_fn = jit(_total_time)
+g_total_time_fn = jit(grad(_total_time, 1))
+
+def _nominal_power(lengths, grades, power_model_params, speed):
+    power = []
+    for i in range(len(speed)):
+        power.append(PowerModel.power_from_speed(power_model_params, grades[i], speed[i]))
+    power = np.array(power)
+    t = lengths / speed
+    return (1 / np.sum(t) * np.sum( t * power**4 ) )**(1/4)
+
+nominal_power_fn = jit(_nominal_power)
+g_nominal_power_fn = jit(grad(_nominal_power, 3))
+
+
+def optimal_power(lengths, grades, power_model_params, target_nominal_power, eps=0.01):
+    # t = np.array([p["duration"] for p in self.intervals])
+    lam = 4.0
+    nominal_power = 0.0
+    f = lambda v : total_time_fn(lengths, v)
+    gf = lambda v : g_total_time_fn(lengths, v)
+    h = lambda v : nominal_power_fn(lengths, grades, power_model_params, v)
+    gh = lambda v : g_nominal_power_fn(lengths, grades, power_model_params, v)
+    v0 = PowerModel.vmin * np.ones(len(lengths))
+    lb = v0
+    ub = PowerModel.vmax * np.ones(len(lengths))
+    bounds = Bounds(lb, ub)
+    constraint = NonlinearConstraint(h, jac=gh, lb=np.array([0]), ub=np.array([target_nominal_power]))
+    # constraint = NonlinearConstraint(h, lb=np.array([0]), ub=np.array([target_nominal_power]))
+    r = minimize(fun=f, jac=gf, x0=v0, constraints=constraint, bounds=bounds).x
+    # r = minimize(fun=f, x0=v0).x
+    return r
 
 class Profile:
     def __init__(self, segment):
@@ -128,9 +169,6 @@ class Profile:
     def _pt_idx(self, idx):
         return deepcopy(self.segment.points[idx])
 
-    def nominal_power(self, p, power_model):
-        t = self.estimate_durations(p, power_model)
-        return (1 / np.sum(t) * np.sum( t * p**4 ) )**(1/4)
 
     def _interval(self, idx):
         length = self.points[idx+1]["distance"] - self.points[idx]["distance"]
@@ -161,6 +199,14 @@ class Profile:
         else:
             return res
 
+    def optimal_power(self, power_model_params, target_nominal_power):
+        assert(len(power_model_params) == 4)
+        print("params = ", power_model_params)
+        lengths = np.array([x["length"] for x in self.intervals])
+        grades = np.array([x["grade"] for x in self.intervals])
+        power = optimal_power(lengths, grades, power_model_params, target_nominal_power)
+        return self.intervals_from_power(power, power_model_params)
+
     def cluster_grades(self, pen=10):
         p = self.segment.points
         diff_alt = [p[i+1]["alt"] - p[i]["alt"] for i in range(len(self.segment.points) - 1)]
@@ -180,31 +226,15 @@ class Profile:
         self.points= [self._pt_idx(i) for i in self.indices]
         self.intervals = [self._interval(i) for i in range(len(self.points) - 1)]
 
-    def estimate_durations(self, power, power_model):
-        result = np.zeros(len(self.intervals))
-        for i in range(len(self.intervals)):
-            spd = power_model.speed_from_power(power[i], self.intervals[i]["grade"])
-            result[i] = self.intervals[i]["length"] / spd
-        return result
 
-    def optimal_power(self, power_model, target_nominal_power, eps=0.01):
-        # t = np.array([p["duration"] for p in self.intervals])
-        lam = 4.0
-        nominal_power = 0.0
-        f = lambda p : np.sum(self.estimate_durations(p, power_model))
-        p0 = target_nominal_power * np.ones(len(self.intervals))
-        constraint = NonlinearConstraint(lambda p: np.array([self.nominal_power(p, power_model)]), lb=np.array([0]), ub=np.array([target_nominal_power]))
-        r = minimize(fun=f, x0=p0, constraints=constraint).x
-        return self.intervals_from_power(r, power_model)
 
-    def intervals_from_power(self, power, power_model):
+    def intervals_from_power(self, speed, power_model):
         result = deepcopy(self.intervals)
         for i in range(len(self.intervals)):
-            spd = power_model.speed_from_power(power[i], self.intervals[i]["grade"])
-            result[i]["duration"] = self.intervals[i]["length"] / spd
-            result[i]["speed"] = spd
-            result[i]["speed_kmh"] = spd*3.6
-            result[i]["power"] = power[i]
+            result[i]["duration"] = self.intervals[i]["length"] / speed[i]
+            result[i]["speed"] = speed[i]
+            result[i]["speed_kmh"] = speed[i]*3.6
+            result[i]["power"] = float(PowerModel.power_from_speed(power_model, self.intervals[i]["grade"], speed[i]))
             if i > 0:
                 prev_t = result[i-1]["time"]
             else:
@@ -215,25 +245,15 @@ class Profile:
 
 class PowerModel:
     vmax = 100
+    vmin = 0.1
     gravity = 9.81
 
-    def __init__(self, mass, drivetrain_efficiency, Cda, Cr):
-        self.mass = mass
-        self.drivetrain_efficiency = drivetrain_efficiency
-        self.Cda = Cda
-        self.Cr = Cr
-
-    def power_from_speed(self, v, grade, wind_speed=0.0): # wind is + for tailwind, - for headwind
-        return PowerModel._power_from_speed(self.mass, self.drivetrain_efficiency, self.Cda, self.Cr, v, grade, wind_speed)
-
-    def speed_from_power(self, power, grade, wind_speed=0.0):
-        return PowerModel._speed_from_power(self.mass, self.drivetrain_efficiency, self.Cda, self.Cr, power, grade, wind_speed)
-
-    def _power_from_speed(mass, drivetrain_efficiency, Cda, Cr, v, grade, wind_speed=0.0):
+    def power_from_speed(params, grade, v, wind_speed=0.0):
+        mass, drivetrain_efficiency, Cda, Cr = params
         return 1/drivetrain_efficiency * v * (Cda * (v - wind_speed) * (v - wind_speed) + Cr + mass * PowerModel.gravity * np.sin(np.arctan(grade / 100)))
 
-    def _speed_from_power(mass, drivetrain_efficiency, Cda, Cr, power, grade, wind_speed=0.0):
-        return bisect(lambda x: power - PowerModel._power_from_speed(mass, drivetrain_efficiency, Cda, Cr, x, grade), 0, PowerModel.vmax)
+    def speed_from_power(params, grade, power, wind_speed=0.0):
+        return bisect(lambda x: power - PowerModel.power_from_speed(params, grade, x), 0, PowerModel.vmax)
 
     def estimate_parameters(mass, profile, drivetrain_efficiency=None, Cr=None):
         if not profile.has_power:
@@ -259,9 +279,9 @@ class PowerModel:
         bounds = Bounds(lb, ub)
         l = np.array([i["duration"] for i in profile.intervals])
 
-        map = lambda x : l * ( PowerModel._power_from_speed(mass, x[0], x[1], x[2], speed, grade) - power)
+        map = lambda x : l * (PowerModel.power_from_speed([mass, x[0], x[1], x[2]], grade, speed) - power)
         res = least_squares(map, lb, bounds=(lb, ub)).x
-        return PowerModel(mass, res[0], res[1], res[2])
+        return np.array([mass, res[0], res[1], res[2]])
 
 if __name__ == "__main__":
     print("testing IGN API...")
@@ -312,11 +332,11 @@ if __name__ == "__main__":
     Cda = 0.25
     Cr = 0.003
     P = 290
-    power_model = PowerModel(mass, drivetrain_efficiency, Cda, Cr)
+    power_model = [mass, drivetrain_efficiency, Cda, Cr]
     speed = 5.0
     grade = 10
-    power = power_model.power_from_speed(speed, grade)
-    r = power_model.speed_from_power(power, grade)
+    power = PowerModel.power_from_speed(power_model, speed, grade)
+    r = PowerModel.speed_from_power(power_model, power, grade)
     print("speed = ", speed, " / ", r)
     print("OK")
     print("Testing est cda")

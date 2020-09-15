@@ -3,7 +3,10 @@ RUN useradd -ms /bin/bash power
 ENV PATH=${HOME}/.local/bin:${PATH}
 COPY python/requirements.txt /app/
 RUN pip install -r /app/requirements.txt
-COPY python/* /app/
+COPY python/ /app/
 COPY secrets/*.txt /app/
 COPY uwsgi.ini /app/
 COPY uwsgi.py /app/
+ENV UWSGI_CHEAPER 0
+ENV UWSGI_PROCESSES 1
+

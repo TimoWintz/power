@@ -4,9 +4,11 @@ from flask import Flask
 from stravalib import Client
 import auth
 import os
+import time
 from flask_restful import Resource, Api
 from flask_restful import reqparse
 from flask_cors import CORS
+import logging
 import shelve
 
 import utils
@@ -17,6 +19,7 @@ api = Api(app)
 cors = CORS(app)
 mycache = shelve.open('puissance', flag='c')
 print("cache = ", list(mycache.keys()))
+logger = logging.getLogger(__name__)
 
 use_ign = True
 ign_secrets = {}
@@ -74,10 +77,10 @@ pm_parser.add_argument('Cr', type=float, help='Rolling resistance coefficicent C
 
 
 def get_segment(args):
+    start = time.time()
     id = args["id"]
     desc = str(frozenset(args.items()))
     if desc in mycache:
-        print("using cache")
         segment = mycache[desc]
     else:
         if args["type"] == "segment":
@@ -88,9 +91,12 @@ def get_segment(args):
             segment.correct_elevation(ign_secrets)
         mycache[desc] = segment
         mycache.sync()
+    elapsed = (time.time()-start)
+    logger.info("Got segment in {}".format(elapsed))
     return segment
 
 def get_profile(segment_args, profile_args):
+    start = time.time()
     segment_desc = str(frozenset(segment_args.items()))
     profile_desc = str(profile_args['pen']) + "_" + segment_desc
     if profile_desc in mycache:
@@ -102,6 +108,8 @@ def get_profile(segment_args, profile_args):
         profile.cluster_grades(profile_args['pen'])
         mycache[profile_desc] = profile
         mycache.sync()
+    elapsed = (time.time()-start)
+    logger.info("Got profile in {}".format(elapsed))
     return profile
 
 opt_parser = reqparse.RequestParser()
@@ -114,12 +122,28 @@ class OptimalPower(Resource):
         profile_args = profile_parser.parse_args()
         profile = get_profile(segment_args, profile_args)
         pm_args = pm_parser.parse_args()
-        power_model = utils.PowerModel(**pm_args)
+        power_model = [pm_args["mass"], pm_args["drivetrain_efficiency"], pm_args["Cda"], pm_args["Cr"]]
         opt_args = opt_parser.parse_args()
+        start = time.time()
         r = profile.optimal_power(power_model, opt_args["power"])
+        elapsed = (time.time()-start)
+        logger.info("Got optimal power in {}".format(elapsed))
         return r
 
 api.add_resource(OptimalPower, "/api/optimal_power")
+
+class Profile(Resource):
+    def get(self):
+        segment_args = segment_parser.parse_args()
+        profile_args = profile_parser.parse_args()
+        profile = get_profile(segment_args, profile_args)
+        return {
+            "segment_points" : profile.segment.points,
+            "profile_points" : profile.points,
+            "profile_intervals" : profile.intervals
+        }
+
+api.add_resource(Profile, "/api/profile")
 
 
 if __name__ == "__main__":
