@@ -10,10 +10,11 @@ from scipy.optimize import bisect, least_squares, minimize, Bounds, NonlinearCon
 from pyowm import OWM
 
 from jax import numpy as np
-from jax import grad, jit
+from jax import grad, jit, jacfwd
 # again, this only works on startup!
 from jax.config import config
 config.update("jax_enable_x64", True)
+
 
 class IGNAlti:
     max_slice = 20
@@ -69,6 +70,8 @@ class Segment:
         segment_stream = client.get_segment_streams(segment_id, types=["latlng", "distance", "altitude"],
             resolution=resolution)
         res = Segment()
+        segment = client.get_segment(segment_id)
+        res.name = segment.name
         n_pts = len(segment_stream["latlng"].data)
         res.points = []
         for i in range(n_pts):
@@ -86,7 +89,10 @@ class Segment:
         client = Client(access_token=access_token)
         segment_stream = client.get_effort_streams(segment_effort_id, types=["latlng", "distance", "altitude", "watts", "time"],
             resolution=resolution)
-        return Segment._from_stream(segment_stream)
+        segment = client.get_segment_effort(segment_effort_id)
+        res = Segment._from_stream(segment_stream)
+        res.name = segment.name
+        return res
 
     def _from_stream(stream):
         res = Segment()
@@ -129,11 +135,17 @@ def _total_time(lengths, speed):
 total_time_fn = jit(_total_time)
 g_total_time_fn = jit(grad(_total_time, 1))
 
-def _nominal_power(lengths, grades, power_model_params, speed):
+def _power(lengths, grades, power_model_params, speed, wind_tan):
     power = []
     for i in range(len(speed)):
-        power.append(PowerModel.power_from_speed(power_model_params, grades[i], speed[i]))
-    power = np.array(power)
+        power.append(PowerModel.power_from_speed(power_model_params, grades[i], speed[i], wind_tan[i]))
+    return np.array(power)
+
+power_fn = jit(_power)
+g_power_fn = jit(jacfwd(_power, 3))
+
+def _nominal_power(lengths, grades, power_model_params, speed, wind_tan):
+    power = power_fn(lengths, grades, power_model_params, speed, wind_tan)
     t = lengths / speed
     return (1 / np.sum(t) * np.sum( t * power**4 ) )**(1/4)
 
@@ -141,23 +153,54 @@ nominal_power_fn = jit(_nominal_power)
 g_nominal_power_fn = jit(grad(_nominal_power, 3))
 
 
-def optimal_power(lengths, grades, power_model_params, target_nominal_power, eps=0.01):
+def optimal_power(lengths, grades, power_model_params, target_nominal_power, wind_tan = None):
     # t = np.array([p["duration"] for p in self.intervals])
+    min_power = 0.5 * target_nominal_power 
+    max_power = 2.0 * target_nominal_power
+
+    if wind_tan is None:
+        wind_tan = np.zeros(len(lengths))
     lam = 4.0
     nominal_power = 0.0
     f = lambda v : total_time_fn(lengths, v)
     gf = lambda v : g_total_time_fn(lengths, v)
-    h = lambda v : nominal_power_fn(lengths, grades, power_model_params, v)
-    gh = lambda v : g_nominal_power_fn(lengths, grades, power_model_params, v)
+
+    constraints = []
+    h = lambda v : nominal_power_fn(lengths, grades, power_model_params, v, wind_tan)
+    gh = lambda v : g_nominal_power_fn(lengths, grades, power_model_params, v, wind_tan)
+    constraints.append(NonlinearConstraint(h, jac=gh, lb=np.array([0]), ub=np.array([target_nominal_power])))
+
+    # h2 = lambda v : power_fn(lengths, grades, power_model_params, v, wind_tan)
+    # gh2 = lambda v : onp.array(g_power_fn(lengths, grades, power_model_params, v, wind_tan))
+    # constraints.append(NonlinearConstraint(h2, jac=gh2, lb=min_power * onp.ones(len(lengths)), ub=max_power * onp.ones(len(lengths))))
+
     v0 = PowerModel.vmin * np.ones(len(lengths))
     lb = v0
     ub = PowerModel.vmax * np.ones(len(lengths))
     bounds = Bounds(lb, ub)
-    constraint = NonlinearConstraint(h, jac=gh, lb=np.array([0]), ub=np.array([target_nominal_power]))
+
+
     # constraint = NonlinearConstraint(h, lb=np.array([0]), ub=np.array([target_nominal_power]))
-    r = minimize(fun=f, jac=gf, x0=v0, constraints=constraint, bounds=bounds).x
+    r = minimize(fun=f, jac=gf, x0=v0, constraints=constraints, bounds=bounds, method="trust-constr")
+    print("OPTIM RESULT")
+    print(r)
     # r = minimize(fun=f, x0=v0).x
-    return r
+    return r.x
+
+class Wind:
+    def __init__(self, speed, direction_deg):
+        self.speed = speed / 3.6
+        self.direction_rad = np.pi / 180 * direction_deg
+
+    def average_tangential_component(self, profile):
+        wind_tan = onp.zeros(len(profile.intervals))
+        for i in range(len(profile.intervals)):
+            v = 0
+            pt1 = profile.points[i]
+            pt2 = profile.points[i+1]
+            angle = self.direction_rad - angle_from_coordinates(pt1["lat"], pt1["lng"], pt2["lat"], pt2["lng"])
+            wind_tan[i] = np.cos(angle) * self.speed
+        return wind_tan
 
 class Profile:
     def __init__(self, segment):
@@ -199,13 +242,18 @@ class Profile:
         else:
             return res
 
-    def optimal_power(self, power_model_params, target_nominal_power):
+    def optimal_power(self, power_model_params, target_nominal_power, wind_speed=0.0, wind_direction=0.0):
         assert(len(power_model_params) == 4)
         print("params = ", power_model_params)
+        if wind_speed != 0.0:
+            wind = Wind(wind_speed, wind_direction)
+            wind_tan = wind.average_tangential_component(self)
+        else:
+            wind_tan = onp.zeros(len(self.intervals))
         lengths = np.array([x["length"] for x in self.intervals])
         grades = np.array([x["grade"] for x in self.intervals])
-        power = optimal_power(lengths, grades, power_model_params, target_nominal_power)
-        return self.intervals_from_power(power, power_model_params)
+        speed = optimal_power(lengths, grades, power_model_params, target_nominal_power, wind_tan)
+        return {"nominal_power" : float(nominal_power_fn(lengths, grades, power_model_params, speed, wind_tan)), "intervals" : self.intervals_from_power(speed, power_model_params, wind_tan)}
 
     def cluster_grades(self, pen=10):
         p = self.segment.points
@@ -228,7 +276,7 @@ class Profile:
 
 
 
-    def intervals_from_power(self, speed, power_model):
+    def intervals_from_power(self, speed, power_model, wind_tan=None):
         result = deepcopy(self.intervals)
         for i in range(len(self.intervals)):
             result[i]["duration"] = self.intervals[i]["length"] / speed[i]
@@ -241,7 +289,18 @@ class Profile:
                 prev_t = 0
             result[i]["time"] = prev_t + result[i]["duration"]
             result[i]["average_kmh"] = result[i]["distance"] / result[i]["time"] * 3.6
+            if wind_tan is not None:
+                result[i]["wind_kmh"] = float(3.6 * wind_tan[i])
+            else:
+                result[i]["wind_tan"] = 0.0
         return result
+
+def angle_from_coordinates(lat1, lng1, lat2, lng2):
+    dlng = lng2 - lng1
+    y = np.sin(dlng) * np.cos(lat2)
+    x = np.cos(lat1) * np.sin(lat2) - np.sin(lat1) * np.cos(lat2) * np.cos(dlng)
+    return np.arctan2(y, x)
+
 
 class PowerModel:
     vmax = 100
@@ -250,7 +309,7 @@ class PowerModel:
 
     def power_from_speed(params, grade, v, wind_speed=0.0):
         mass, drivetrain_efficiency, Cda, Cr = params
-        return 1/drivetrain_efficiency * v * (Cda * (v - wind_speed) * (v - wind_speed) + Cr + mass * PowerModel.gravity * np.sin(np.arctan(grade / 100)))
+        return 1/drivetrain_efficiency * v * (Cda * (v + wind_speed) * (v + wind_speed) + Cr + mass * PowerModel.gravity * np.sin(np.arctan(grade / 100)))
 
     def speed_from_power(params, grade, power, wind_speed=0.0):
         return bisect(lambda x: power - PowerModel.power_from_speed(params, grade, x), 0, PowerModel.vmax)
@@ -265,18 +324,6 @@ class PowerModel:
 
         lb = np.array([0.8, 0.1, 0.001])
         ub = np.array([1.0, 0.5, 0.01])
-
-        eps = 1e-5
-
-        if drivetrain_efficiency is not None:
-            lb[0] = drivetrain_efficiency
-            ub[0] = drivetrain_efficiency+eps
-
-        if Cr is not None:
-            lb[2] = drivetrain_efficiency
-            ub[2] = drivetrain_efficiency+eps
-
-        bounds = Bounds(lb, ub)
         l = np.array([i["duration"] for i in profile.intervals])
 
         map = lambda x : l * (PowerModel.power_from_speed([mass, x[0], x[1], x[2]], grade, speed) - power)

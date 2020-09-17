@@ -30,6 +30,9 @@ if use_ign:
         ign_secrets["login"] = f.readline().strip()
         ign_secrets["password"] = f.readline().strip()
 
+with open(os.path.join(d, "gmaps_secrets.txt")) as f:
+    gmaps_secrets = f.readline().strip()
+
 @app.route('/static/<path:path>')
 def send_js(path):
     return send_from_directory('js', path)
@@ -64,7 +67,8 @@ api.add_resource(Auth, "/api/auth")
 segment_parser = reqparse.RequestParser()
 segment_parser.add_argument('type', type=str, help='Type (segment or effort)', default="segment")
 segment_parser.add_argument('id', type=int, help='Segment id')
-segment_parser.add_argument('use_ign', type=bool, default=True)
+segment_parser.add_argument('use_ign', type=int, default=0)
+segment_parser.add_argument('use_gmaps', type=int, default=0)
 
 profile_parser = reqparse.RequestParser()
 profile_parser.add_argument('pen', type=float, help='Penalty, higher means less divisions in the profile', default=3.0)
@@ -74,9 +78,12 @@ pm_parser.add_argument('mass', type=float, help='Total mass')
 pm_parser.add_argument('drivetrain_efficiency', type=float, help='Drivetrain efficiency (0.0 - 1.0)', default=0.98)
 pm_parser.add_argument('Cda', type=float, help='Air friction coefficient Cda', default=0.3)
 pm_parser.add_argument('Cr', type=float, help='Rolling resistance coefficicent Cr', default=0.003)
+pm_parser.add_argument('wind_speed', type=float, help='Wind speed', default=0.00)
+pm_parser.add_argument('wind_direction', type=float, help='Wind direction', default=0.00)
 
 
 def get_segment(args):
+    print(args)
     start = time.time()
     id = args["id"]
     desc = str(frozenset(args.items()))
@@ -89,6 +96,8 @@ def get_segment(args):
             segment = utils.Segment.from_strava_effort(session['access_token'], id)
         if args["use_ign"]:
             segment.correct_elevation(ign_secrets)
+        if args["use_gmaps"]:
+            segment.snap_to_roads(gmaps_secrets)
         mycache[desc] = segment
         mycache.sync()
     elapsed = (time.time()-start)
@@ -96,6 +105,8 @@ def get_segment(args):
     return segment
 
 def get_profile(segment_args, profile_args):
+    print(segment_args)
+    print(profile_args)
     start = time.time()
     segment_desc = str(frozenset(segment_args.items()))
     profile_desc = str(profile_args['pen']) + "_" + segment_desc
@@ -125,7 +136,7 @@ class OptimalPower(Resource):
         power_model = [pm_args["mass"], pm_args["drivetrain_efficiency"], pm_args["Cda"], pm_args["Cr"]]
         opt_args = opt_parser.parse_args()
         start = time.time()
-        r = profile.optimal_power(power_model, opt_args["power"])
+        r = profile.optimal_power(power_model, opt_args["power"], pm_args["wind_speed"], pm_args["wind_direction"])
         elapsed = (time.time()-start)
         logger.info("Got optimal power in {}".format(elapsed))
         return r
@@ -137,11 +148,13 @@ class Profile(Resource):
         segment_args = segment_parser.parse_args()
         profile_args = profile_parser.parse_args()
         profile = get_profile(segment_args, profile_args)
-        return {
+        res = {
+            "segment_name": profile.segment.name,
             "segment_points" : profile.segment.points,
             "profile_points" : profile.points,
             "profile_intervals" : profile.intervals
         }
+        return res
 
 api.add_resource(Profile, "/api/profile")
 
