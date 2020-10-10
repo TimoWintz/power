@@ -5,8 +5,6 @@ COPY python/requirements.txt /app/
 RUN pip install -r /app/requirements.txt
 COPY python/ /app/
 COPY secrets/*.txt /app/
-COPY uwsgi.ini /app/
-COPY uwsgi.py /app/
-ENV UWSGI_CHEAPER 0
-ENV UWSGI_PROCESSES 1
+ENV UWSGI_CHEAPER 4
+ENV UWSGI_PROCESSES 8
 

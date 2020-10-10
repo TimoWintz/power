@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from flask import render_template, request, redirect, make_response, session
+from flask import render_template, request, redirect, make_response, session, send_from_directory
 from flask import Flask
 from stravalib import Client
 import auth
@@ -10,6 +10,8 @@ from flask_restful import reqparse
 from flask_cors import CORS
 import logging
 import shelve
+from uwsgidecorators import *
+from shared_memory_dict import SharedMemoryDict
 
 import utils
 
@@ -17,9 +19,18 @@ app = Flask(__name__)
 app.secret_key = 'blablabla'
 api = Api(app)
 cors = CORS(app)
-mycache = shelve.open('puissance', flag='c')
-print("cache = ", list(mycache.keys()))
+# mycache = shelve.open('/tmp/puissance')
+mycache = SharedMemoryDict(name='segments', size=1000000)
+# print("cache = ", list(mycache.keys()))
 logger = logging.getLogger(__name__)
+
+@lock
+def read_cache(key):
+    return mycache[key]
+
+@lock
+def write_cache(key, val):
+    mycache[key] = val
 
 use_ign = True
 ign_secrets = {}
@@ -33,17 +44,13 @@ if use_ign:
 with open(os.path.join(d, "gmaps_secrets.txt")) as f:
     gmaps_secrets = f.readline().strip()
 
-@app.route('/static/<path:path>')
-def send_js(path):
-    return send_from_directory('js', path)
-
-
-@app.route('/')
+@app.route('/auth')
 def main():
     try:
         client = Client(access_token=session['access_token'])
         athlete = client.get_athlete()
-        return redirect('/static/index.html')
+        return send_from_directory('static', 'index.html')
+
     except:
         with open('strava_secrets.txt') as f:
             client_id = f.readline().strip()
@@ -63,6 +70,12 @@ class Auth(Resource):
             return {"auth" : False}
 api.add_resource(Auth, "/api/auth")
 
+@app.route('/')
+def index():
+    return send_from_directory('static', 'index.html')
+
+
+
 
 segment_parser = reqparse.RequestParser()
 segment_parser.add_argument('type', type=str, help='Type (segment or effort)', default="segment")
@@ -72,15 +85,17 @@ segment_parser.add_argument('use_gmaps', type=int, default=0)
 
 profile_parser = reqparse.RequestParser()
 profile_parser.add_argument('pen', type=float, help='Penalty, higher means less divisions in the profile', default=3.0)
+profile_parser.add_argument('key', type=str, help='What key to use for profile segmentation', default="grade")
 
 pm_parser = reqparse.RequestParser()
 pm_parser.add_argument('mass', type=float, help='Total mass')
 pm_parser.add_argument('drivetrain_efficiency', type=float, help='Drivetrain efficiency (0.0 - 1.0)', default=0.98)
-pm_parser.add_argument('Cda', type=float, help='Air friction coefficient Cda', default=0.3)
+pm_parser.add_argument('Cda', type=float, help='Air friction coefficient Cda', default=0.35)
 pm_parser.add_argument('Cr', type=float, help='Rolling resistance coefficicent Cr', default=0.003)
 pm_parser.add_argument('wind_speed', type=float, help='Wind speed', default=0.00)
 pm_parser.add_argument('wind_direction', type=float, help='Wind direction', default=0.00)
-
+pm_parser.add_argument('temp', type=float, help='Temperature (C)', default=20.00)
+pm_parser.add_argument('constant_power', type=int, help='Do not optim power', default=0)
 
 def get_segment(args):
     print(args)
@@ -88,8 +103,9 @@ def get_segment(args):
     id = args["id"]
     desc = str(frozenset(args.items()))
     if desc in mycache:
-        segment = mycache[desc]
+        segment = read_cache(desc)
     else:
+        print("type = ", args["type"])
         if args["type"] == "segment":
             segment = utils.Segment.from_strava_segment(session['access_token'], id)
         elif args["type"] == "effort":
@@ -98,8 +114,7 @@ def get_segment(args):
             segment.correct_elevation(ign_secrets)
         if args["use_gmaps"]:
             segment.snap_to_roads(gmaps_secrets)
-        mycache[desc] = segment
-        mycache.sync()
+        write_cache(desc, segment)
     elapsed = (time.time()-start)
     logger.info("Got segment in {}".format(elapsed))
     return segment
@@ -112,13 +127,12 @@ def get_profile(segment_args, profile_args):
     profile_desc = str(profile_args['pen']) + "_" + segment_desc
     if profile_desc in mycache:
         print("using profile cache")
-        profile = mycache[profile_desc]
+        profile = read_cache(profile_desc)
     else:
         segment = get_segment(segment_args)
         profile = utils.Profile(segment)
-        profile.cluster_grades(profile_args['pen'])
-        mycache[profile_desc] = profile
-        mycache.sync()
+        profile.regularize(profile_args['pen'], profile_args['key'])
+        write_cache(profile_desc, profile)
     elapsed = (time.time()-start)
     logger.info("Got profile in {}".format(elapsed))
     return profile
@@ -136,7 +150,10 @@ class OptimalPower(Resource):
         power_model = [pm_args["mass"], pm_args["drivetrain_efficiency"], pm_args["Cda"], pm_args["Cr"]]
         opt_args = opt_parser.parse_args()
         start = time.time()
-        r = profile.optimal_power(power_model, opt_args["power"], pm_args["wind_speed"], pm_args["wind_direction"])
+        if pm_args["wind_speed"] > 0:
+            profile.add_wind(pm_args["wind_speed"], pm_args["wind_direction"])
+        profile.set_temp(pm_args["temp"])
+        r = profile.optimal_power(power_model, target_normalized_power=opt_args["power"], constant_power=pm_args["constant_power"])
         elapsed = (time.time()-start)
         logger.info("Got optimal power in {}".format(elapsed))
         return r
@@ -158,9 +175,33 @@ class Profile(Resource):
 
 api.add_resource(Profile, "/api/profile")
 
+class EstimateParameters(Resource):
+    def get(self):
+        segment_args = segment_parser.parse_args()
+        profile_args = profile_parser.parse_args()
+        pm_args = pm_parser.parse_args()
+        profile = get_profile(segment_args, profile_args)
+        if pm_args["wind_speed"] > 0:
+            profile.add_wind(pm_args["wind_speed"], pm_args["wind_direction"])
+        if not profile.has_temperature:
+            print("Using provided temperature")
+            profile.set_temp(pm_args["temp"])
+        mass = None if pm_args["mass"] == 0. else pm_args["mass"]
+        Cda = None if pm_args["Cda"] == 0. else pm_args["Cda"]
+        Cr = None if pm_args["Cr"] == 0. else pm_args["Cr"]
+        drivetrain_efficiency = None if pm_args["drivetrain_efficiency"] == 0. else pm_args["drivetrain_efficiency"]
+        params = utils.PowerModel.estimate_parameters(profile, Cda=Cda, drivetrain_efficiency=drivetrain_efficiency, Cr=Cr, mass=mass)
+        return {
+            "mass": float(params[0]),
+            "drivetrain_efficiency": float(params[1]),
+            "Cda" : float(params[2]),
+            "Cr" : float(params[3])
+        }
+api.add_resource(EstimateParameters, "/api/parameters")
+
+@app.route('/<path:path>')
+def send_js(path):
+    return send_from_directory('static', path)
 
 if __name__ == "__main__":
-    try:
-        app.run()
-    except:
-        shelve.close()
+    app.run()
