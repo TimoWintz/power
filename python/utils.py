@@ -160,7 +160,7 @@ def _normalized_power(power_model_params, lengths, grades, headwind, altitude, t
     return (1 / np.sum(t) * np.sum( t * power**4 ) )**(1/4)
 
 normalized_power_fn = jit(_normalized_power)
-g_normalized_power_fn = jit(grad(_normalized_power, 3))
+g_normalized_power_fn = jit(grad(_normalized_power, 6))
 
 def _average_power(power_model_params, lengths, grades, headwind, altitude, temp, speed):
     power = []
@@ -171,7 +171,7 @@ def _average_power(power_model_params, lengths, grades, headwind, altitude, temp
     return (1 / np.sum(t) * np.sum( t * power ) )
 
 average_power_fn = jit(_average_power)
-g_average_power_fn = jit(grad(_average_power, 3))
+g_average_power_fn = jit(grad(_average_power, 6))
 
 def optimal_power(power_model_params, lengths, grades, headwind, altitudes, temp, target_normalized_power,
     constant_power=False, constant_velocity=False, use_normalized=True):
@@ -214,15 +214,19 @@ def optimal_power(power_model_params, lengths, grades, headwind, altitudes, temp
     v0 = np.array([PowerModel.speed_from_power(power_model_params, grades[i], target_normalized_power, altitudes[i], temp[i], headwind[i]) for i in range(len(grades))])
     print("v0 = ", v0)
     if constant_power:
+        print("NP = ", h(v0))
         return onp.array(v0)
     lb = np.zeros(len(lengths))
-    ub = np.array([PowerModel.speed_from_power(power_model_params, grades[i], max_power, headwind[i]) for i in range(len(grades))])
+    ub = np.array([PowerModel.speed_from_power(power_model_params, grades[i], max_power, altitudes[i], temp[i], headwind[i]) for i in range(len(grades))])
     bounds = Bounds(lb, ub)
 
     # constraint = NonlinearConstraint(h, lb=np.array([0]), ub=np.array([target_normalized_power]))
-    # r = minimize(fun=f, jac=gf, x0=v0, constraints=constraints, bounds=bounds)
-    # if not r.success:
-    r = minimize(fun=f, jac=gf, x0=v0, constraints=constraints, bounds=bounds, method="trust-constr")
+    print("fun = ", f(v0))
+    r = minimize(fun=f, jac=gf, x0=v0, constraints=constraints, bounds=bounds)
+    if not r.success:
+        r = minimize(fun=f, jac=gf, x0=v0, constraints=constraints, bounds=bounds, method="trust-constr")
+    print("fun = ", f(r.x))
+    print("NP = ", h(r.x))
     print("OPTIM RESULT")
     print(r)
     return r.x
