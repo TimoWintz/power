@@ -60,12 +60,14 @@ class Segment:
     def __init__(self):
         self.points = []
         self.has_gps = False
-        self.has_power = False
+        self.has_watts = False
         self.has_temperature = False
 
+    @staticmethod
     def load_gpx(gpx_file):
         pass
 
+    @staticmethod
     def from_strava_segment(access_token, segment_id, resolution="low"):
         client = Client(access_token=access_token)
         segment_stream = client.get_segment_streams(segment_id, types=["latlng", "distance", "altitude"],
@@ -88,6 +90,7 @@ class Segment:
         res.has_temperature = False
         return res
 
+    @staticmethod
     def from_strava_efforts(access_token, segment_id, resolution="low"):
         res = []
         client = Client(access_token=access_token)
@@ -96,6 +99,7 @@ class Segment:
             res.append(Segment.from_strava_effort(access_token, effort.id))
         return res
 
+    @staticmethod
     def from_strava_effort(access_token, segment_effort_id, resolution="low"):
         client = Client(access_token=access_token)
         segment_stream = client.get_effort_streams(segment_effort_id, types=["latlng", "distance", "altitude", "watts", "time", "temp"],
@@ -105,31 +109,34 @@ class Segment:
         res.name = segment.name
         return res
 
+    @staticmethod
     def _from_stream(stream):
         res = Segment()
         res.has_power = False
         n_pts = len(stream["latlng"].data)
         res.points = []
         res.test = stream
+        origin_distance = stream["distance"].data[0]
         for i in range(n_pts):
             res.points.append({
                 "lat" : stream["latlng"].data[i][0],
                 "lng" : stream["latlng"].data[i][1],
                 "alt" : stream["altitude"].data[i],
-                "distance" : stream["distance"].data[i],
+                "distance" : stream["distance"].data[i] - origin_distance,
                 "time" : stream["time"].data[i]
             })
             if "watts" in stream.keys():
-                res.points[-1]["power"] = stream["watts"].data[i]
-                res.has_power = True
+                res.points[-1]["watts"] = stream["watts"].data[i]
+                res.has_watts = True
             if "temp" in stream.keys():
                 res.points[-1]["temp"] = stream["temp"].data[i]
-                self.has_temperature = True
+                res.has_temperature = True
             else:
                 res.points[-1]["temp"] = 20
         res.has_gps = True
         return res
 
+    @staticmethod
     def from_activity(access_token, activity_id, resolution="low"):
         client = Client(access_token=access_token)
         activity_stream = client.get_activity_streams(activity_id, types=["latlng", "distance", "altitude", "watts", "time"],
@@ -154,7 +161,8 @@ g_total_time_fn = jit(grad(_total_time, 1))
 def _normalized_power(power_model_params, lengths, grades, headwind, altitude, temp, speed):
     power = []
     for i in range(len(speed)):
-        power.append(PowerModel.power_from_speed(power_model_params, grades[i], speed[i], altitude[i], temp[i], headwind[i]))
+        power.append(PowerModel.power_from_speed(power_model_params, grades[i],
+            speed[i], altitude[i], temp[i], headwind[i]))
     power = np.array(power)
     t = lengths / speed
     return (1 / np.sum(t) * np.sum( t * power**4 ) )**(1/4)
@@ -165,7 +173,8 @@ g_normalized_power_fn = jit(grad(_normalized_power, 6))
 def _average_power(power_model_params, lengths, grades, headwind, altitude, temp, speed):
     power = []
     for i in range(len(speed)):
-        power.append(PowerModel.power_from_speed(power_model_params, grades[i], speed[i], altitude[i], temp[i], headwind[i]))
+        power.append(PowerModel.power_from_speed(power_model_params, grades[i],
+            speed[i], altitude[i], temp[i], headwind[i]))
     power = np.array(power)
     t = lengths / speed
     return (1 / np.sum(t) * np.sum( t * power ) )
@@ -173,18 +182,39 @@ def _average_power(power_model_params, lengths, grades, headwind, altitude, temp
 average_power_fn = jit(_average_power)
 g_average_power_fn = jit(grad(_average_power, 6))
 
-def optimal_power(power_model_params, lengths, grades, headwind, altitudes, temp, target_normalized_power,
-    constant_power=False, constant_velocity=False, use_normalized=True):
 
-    min_power = 0.5 * target_normalized_power 
+
+def _wp_exp(power_model_params, lengths, grades, headwind, altitude, temp, speed, ftp, wp0):
+    power = []
+    for i in range(len(speed)):
+        power.append(PowerModel.power_from_speed(power_model_params, grades[i],
+            speed[i], altitude[i], temp[i], headwind[i]))
+    power = np.array(power)
+    dp_pos = np.maximum(power - ftp, 0)
+    dp_neg = np.minimum(power - ftp, 0)
+    #tau = 546 * np.exp(0.01 * dp_neg) + 316
+    rec_factor = dp_neg / wp0 # skiba 2015
+    dt = lengths / speed
+    Wp_exp = [0.0]
+    for i in range(len(speed)):
+        new_val = (Wp_exp[-1] + dt[i]*dp_pos[i]) * np.exp(rec_factor[i] * dt[i])
+        Wp_exp.append(new_val)
+    return np.array(Wp_exp[1:])
+
+wp_exp_fn = jit(_wp_exp)
+# wp_exp_fn = _wp_exp
+g_wp_exp_fn = jit(jacfwd(_wp_exp, 6))
+
+def optimal_power(power_model_params, lengths, grades, headwind, altitudes, temp, target_normalized_power,
+    constant_power=False, constant_velocity=False, use_normalized=True, use_wp_bal=False, wp0=20000):
+
     max_power = 4.0 * target_normalized_power
 
     if headwind is None:
         headwind = np.zeros(len(lengths))
     if temp is None:
         temp = np.zeros(len(lengths))
-    lam = 4.0
-    normalized_power = 0.0
+
     f = lambda v : total_time_fn(lengths, v)
     gf = lambda v : g_total_time_fn(lengths, v)
 
@@ -198,10 +228,15 @@ def optimal_power(power_model_params, lengths, grades, headwind, altitudes, temp
     if use_normalized:
         h = lambda v : normalized_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v)
         gh = lambda v : g_normalized_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v)
+        constraints.append(NonlinearConstraint(h, jac=gh, lb=np.array([0]), ub=np.array([target_normalized_power])))
+    elif use_wp_bal:
+        h = lambda v : wp_exp_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v, target_normalized_power, wp0)
+        gh = lambda v : g_wp_exp_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v, target_normalized_power, wp0)
+        constraints.append(NonlinearConstraint(h, jac=gh, lb=np.array(len(lengths)*[0]), ub=np.array(len(lengths)*[wp0])))
     else:
         h = lambda v : average_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v)
         gh = lambda v : g_average_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v)
-    constraints.append(NonlinearConstraint(h, jac=gh, lb=np.array([0]), ub=np.array([target_normalized_power])))
+        constraints.append(NonlinearConstraint(h, jac=gh, lb=np.array([0]), ub=np.array([target_normalized_power])))
 
     if constant_velocity:
         v = 5*np.ones(len(grades))
@@ -216,19 +251,22 @@ def optimal_power(power_model_params, lengths, grades, headwind, altitudes, temp
     if constant_power:
         print("NP = ", h(v0))
         return onp.array(v0)
-    lb = np.zeros(len(lengths))
+    if use_wp_bal:
+        v0 = 2*v0
+
+    lb = min_speed * np.ones(len(lengths))
     ub = np.array([PowerModel.speed_from_power(power_model_params, grades[i], max_power, altitudes[i], temp[i], headwind[i]) for i in range(len(grades))])
     bounds = Bounds(lb, ub)
 
-    # constraint = NonlinearConstraint(h, lb=np.array([0]), ub=np.array([target_normalized_power]))
     print("fun = ", f(v0))
     r = minimize(fun=f, jac=gf, x0=v0, constraints=constraints, bounds=bounds)
     if not r.success:
         r = minimize(fun=f, jac=gf, x0=v0, constraints=constraints, bounds=bounds, method="trust-constr")
     print("fun = ", f(r.x))
-    print("NP = ", h(r.x))
     print("OPTIM RESULT")
     print(r)
+    print("constraint = ", h(r.x))
+
     return r.x
 
 class Wind:
@@ -239,7 +277,6 @@ class Wind:
     def average_tangential_component(self, profile):
         headwind = onp.zeros(len(profile.intervals))
         for i in range(len(profile.intervals)):
-            v = 0
             pt1 = profile.points[i]
             pt2 = profile.points[i+1]
             angle = self.direction_rad - angle_from_coordinates(pt1["lat"], pt1["lng"], pt2["lat"], pt2["lng"])
@@ -250,7 +287,7 @@ class Profile:
     def __init__(self, segment=None):
         if segment is not None:
             self.segment = segment
-            self.has_power = self.segment.has_power
+            self.has_watts = self.segment.has_watts
             self.has_temperature = self.segment.has_temperature
             self.points = deepcopy(self.segment.points)
             self.intervals = [self._interval_indices(i, i+1) for i in range(len(self.points)-1)]
@@ -258,9 +295,10 @@ class Profile:
         else:
             self.points = []
             self.intervals = []
-            self.has_power = False
+            self.has_watts = False
             self.has_temperature = False
         self.has_wind = False
+        self.has_est_power = False
 
     def update(self):
         for i, interval in enumerate(self.intervals):
@@ -275,7 +313,7 @@ class Profile:
         dist = self.points[i2]["distance"] - self.points[i1]["distance"]
         for i in range(i1, i2):
             dt = (self.points[i+1]["time"] - self.points[i]["time"])
-            p += self.points[i]["power"] * dt
+            p += self.points[i]["watts"] * dt
         p /= T
         return p
 
@@ -295,9 +333,9 @@ class Profile:
             res["duration"] = self.points[i2]["time"] - self.points[i1]["time"]
             res["time"] = self.points[i2]["time"]
             res["speed"] = res["length"] / res["duration"]
-        if self.has_power:
+        if self.has_watts:
             power = self._average_power(i1, i2)
-            res["power"] = power
+            res["watts"] = power
         return res
 
     def set_temp(self, temp):
@@ -312,10 +350,7 @@ class Profile:
         self.has_wind = True
 
     def optimal_power(self, power_model_params, target_normalized_power,
-                constant_power=False,
-                constant_velocity=False,
-                use_normalized=True):
-        print("Constant = ", constant_power)
+                optim_type="np", wp0=20000):
         assert(len(power_model_params) == 4)
         print("params = ", power_model_params)
         if self.has_wind:
@@ -326,10 +361,28 @@ class Profile:
         temps = np.array([x["temp"] for x in self.intervals])
         altitudes = np.array([x["altitude"] for x in self.intervals])
         grades = np.array([x["grade"] for x in self.intervals])
+        if optim_type == "np":
+            use_normalized = True
+            constant_power = False
+            constant_velocity = False
+            use_wp_bal = False
+        elif optim_type == "constant_power":
+            use_normalized = False
+            constant_power = True
+            constant_velocity = False
+            use_wp_bal = False
+        elif optim_type == "wp_bal":
+            use_normalized = False
+            constant_power = False
+            constant_velocity = False
+            use_wp_bal = True
+        else:
+            raise Exception("Unknown optimization type")
+
         speed = optimal_power(power_model_params, lengths, grades, headwind, altitudes, temps, target_normalized_power,
-            constant_power=constant_power, constant_velocity=constant_velocity, use_normalized=use_normalized)
+            constant_power=constant_power, constant_velocity=constant_velocity, use_normalized=use_normalized, use_wp_bal=use_wp_bal, wp0=wp0)
         return {"normalized_power" : float(normalized_power_fn(power_model_params, lengths, grades, headwind, altitudes, temps, speed)),
-                "intervals" : self.intervals_from_power(speed, power_model_params)}
+                "intervals" : self.intervals_from_speed(power_model_params, speed=speed)}
 
     def regularize(self, pen=10, key="grade"):
         values = np.array([x[key] for x in self.intervals])
@@ -340,7 +393,10 @@ class Profile:
         self.points= [self.points[i] for i in self.indices]
         self.update()
 
-    def intervals_from_power(self, speed, power_model):
+    def intervals_from_speed(self, power_model, speed=None):
+        if speed is None:
+            speed = onp.array([x["length"] / x["duration"] for x in self.intervals])
+        print("speed=", speed)
         result = deepcopy(self.intervals)
         for i in range(len(self.intervals)):
             if self.has_wind:
@@ -351,7 +407,11 @@ class Profile:
             result[i]["duration"] = self.intervals[i]["length"] / speed[i]
             result[i]["speed"] = speed[i]
             result[i]["speed_kmh"] = speed[i]*3.6
-            result[i]["power"] = float(PowerModel.power_from_speed(power_model, self.intervals[i]["grade"], speed[i], self.intervals[i]["altitude"], self.intervals[i]["temp"], wind))
+            print(power_model)
+            print(self.intervals[i]["grade"])
+            print(speed[i])
+            print(self.intervals[i]["altitude"], self.intervals[i]["temp"], wind)
+            result[i]["est_power"] = float(PowerModel.power_from_speed(power_model, self.intervals[i]["grade"], speed[i], self.intervals[i]["altitude"], self.intervals[i]["temp"], wind))
             if i > 0:
                 prev_t = result[i-1]["time"]
             else:
@@ -372,33 +432,39 @@ class PowerModel:
     vmin = 0.1
     gravity = 9.81
 
+    @staticmethod
     def pressure_from_altitude(alt):
         return 1013.25 * (1-0.0065*alt/288.15)**(5.255)
-
+    
+    @staticmethod
     def air_density_pressure(temperature_C, pressure_hpa):
         R_air = 287
         temperature_K = temperature_C + 273
         pressure_pa = 100*pressure_hpa
         air_density = pressure_pa / temperature_K / R_air
         return air_density
-
+    
+    @staticmethod
     def air_density(alt, temperature_C):
         return PowerModel.air_density_pressure(temperature_C, PowerModel.pressure_from_altitude(alt))
-
+    
+    @staticmethod
     def power_from_speed(params, grade, v, altitude=0, temperature_C=20, wind_speed=0.0):
         mass, drivetrain_efficiency, Cda, Cr = params
         rho = PowerModel.air_density(altitude, temperature_C)
         return  1/drivetrain_efficiency * v * (0.5 * rho * Cda * np.sign(v+wind_speed) *(v + wind_speed) * (v + wind_speed) + Cr * mass * PowerModel.gravity + mass * PowerModel.gravity * np.sin(np.arctan(grade / 100)))
-
+    
+    @staticmethod
     def speed_from_power(params, grade, power, alt=0, temperature_C=20, wind_speed=0.0):
         return bisect(lambda x: power - PowerModel.power_from_speed(params, grade, x, alt, temperature_C, wind_speed), 0, PowerModel.vmax)
-
+    
+    @staticmethod
     def estimate_parameters(profile, Cda=None, drivetrain_efficiency=None, Cr=None, mass=None):
-        if not profile.has_power:
+        if not profile.has_watts:
             raise Exception("Profile must have power data")
 
         speed = np.array([p["speed"] for p in profile.intervals])
-        power = np.array([p["power"] for p in profile.intervals])
+        power = np.array([p["watts"] for p in profile.intervals])
         grade = np.array([p["grade"] for p in profile.intervals])
         altitude = np.array([p["altitude"] for p in profile.intervals])
         if profile.has_wind:
@@ -478,7 +544,7 @@ if __name__ == "__main__":
 
     print("Approximating profile...")
     profile = Profile(segment_2)
-    profile.cluster_grades(3)
+    #profile.cluster_grades(3)
     print("OK")
 
     print("Testing power model")

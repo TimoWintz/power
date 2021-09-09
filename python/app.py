@@ -10,7 +10,7 @@ from flask_restful import reqparse
 from flask_cors import CORS
 import logging
 import shelve
-from uwsgidecorators import *
+# from uwsgidecorators import *
 from shared_memory_dict import SharedMemoryDict
 
 import utils
@@ -24,11 +24,11 @@ mycache = SharedMemoryDict(name='segments', size=1000000)
 # print("cache = ", list(mycache.keys()))
 logger = logging.getLogger(__name__)
 
-@lock
+# @lock
 def read_cache(key):
     return mycache[key]
 
-@lock
+# @lock
 def write_cache(key, val):
     mycache[key] = val
 
@@ -49,6 +49,7 @@ def main():
     try:
         client = Client(access_token=session['access_token'])
         athlete = client.get_athlete()
+        print(athlete)
         return send_from_directory('static', 'index.html')
 
     except:
@@ -95,7 +96,8 @@ pm_parser.add_argument('Cr', type=float, help='Rolling resistance coefficicent C
 pm_parser.add_argument('wind_speed', type=float, help='Wind speed', default=0.00)
 pm_parser.add_argument('wind_direction', type=float, help='Wind direction', default=0.00)
 pm_parser.add_argument('temp', type=float, help='Temperature (C)', default=20.00)
-pm_parser.add_argument('constant_power', type=int, help='Do not optim power', default=0)
+pm_parser.add_argument('optim_type', type=str, help='Type of optimization', default='np')
+pm_parser.add_argument('wp0', type=float, help='Wp', default=20.0)
 
 def get_segment(args):
     print(args)
@@ -153,7 +155,7 @@ class OptimalPower(Resource):
         if pm_args["wind_speed"] > 0:
             profile.add_wind(pm_args["wind_speed"], pm_args["wind_direction"])
         profile.set_temp(pm_args["temp"])
-        r = profile.optimal_power(power_model, target_normalized_power=opt_args["power"], constant_power=pm_args["constant_power"])
+        r = profile.optimal_power(power_model, target_normalized_power=opt_args["power"], optim_type=pm_args["optim_type"], wp0=1000*pm_args["wp0"])
         elapsed = (time.time()-start)
         logger.info("Got optimal power in {}".format(elapsed))
         return r
@@ -165,11 +167,21 @@ class Profile(Resource):
         segment_args = segment_parser.parse_args()
         profile_args = profile_parser.parse_args()
         profile = get_profile(segment_args, profile_args)
+        pm_args = pm_parser.parse_args()
+        power_model = [pm_args["mass"], pm_args["drivetrain_efficiency"], pm_args["Cda"], pm_args["Cr"]]
+        if pm_args["wind_speed"] > 0:
+            profile.add_wind(pm_args["wind_speed"], pm_args["wind_direction"])
+        profile.set_temp(pm_args["temp"])
+        if segment_args["type"] == "effort":
+            intervals = profile.intervals_from_speed(power_model)
+        else:
+            intervals = profile.intervals
+       
         res = {
             "segment_name": profile.segment.name,
             "segment_points" : profile.segment.points,
             "profile_points" : profile.points,
-            "profile_intervals" : profile.intervals
+            "profile_intervals" : intervals
         }
         return res
 

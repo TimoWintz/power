@@ -21,10 +21,12 @@
   <script src="auth.js"></script>
   <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css"
     integrity="sha384-JcKb8q3iqJ61gNV9KGb8thSsNjpSL0n8PARn9HuZOnIxN0hoP+VmmDGMN5t9UJ0Z" crossorigin="anonymous">
+  <link rel="stylesheet" href="style.css">
 
 </head>
 
 <body>
+
   <nav class="navbar navbar-expand-sm bg-light navbar-light">
     <!-- Links -->
     <ul class="navbar-nav">
@@ -41,6 +43,7 @@
 
   </div>
   <div class="container" id="main">
+
     <h1> Optimal power </h1>
     <form id="profileform">
       <div class="form-group">
@@ -49,6 +52,14 @@
         <small id="idhelp" class="form-text text-muted">The segment ID is the number at the end of the adress when you
           are on a segment detail page (e.g https://www.strava.com/segments/18593287 -&gt; ID = 18593287)</small>
       </div>
+      <div class="form-group">
+        <label for="select_type">Type</label>
+      <select class="form-control" id="select_type">
+        <option value="segment">Segment</option>
+        <option value="effort">Segment effort</option>
+      </select>
+    </div>
+   
       <label for="range">Profile regularization (more means less intervals)</label>
       <input type="range" class="custom-range" min="0.1" max="10" step="0.1" default="3" id="pen" required>
       <div class="form-group form-check">
@@ -84,17 +95,17 @@
       <div class="form-group row">
         <label for="efficiency" class="col-sm-4 col-form-label">Drivetrain efficiency (0.95-0.98)</label>
         <div class="col-sm-8">
-          <input type="number" class="form-control" id="efficiency" value="0.98" required>
+          <input type="number" class="form-control" id="efficiency" value="0.98" step="0.001" required>
         </div>
       </div>
       <div class="form-group row">
-        <label for="staticEmail" class="col-sm-4 col-form-label">Air drag coefficient (Cda) in m&Acirc;&sup2;</label>
+        <label for="cda" class="col-sm-4 col-form-label">Air drag coefficient (Cda) in m&Acirc;&sup2;</label>
         <div class="col-sm-8">
           <input type="number" class="form-control" id="cda" value="0.3" step="0.01" required>
         </div>
       </div>
       <div class="form-group row">
-        <label for="staticEmail" class="col-sm-4 col-form-label">Rolling resistance coefficient (Cr)</label>
+        <label for="cr" class="col-sm-4 col-form-label">Rolling resistance coefficient (Cr)</label>
         <div class="col-sm-8">
           <input type="number" class="form-control" id="cr" value="0.003" step="0.0001" required>
         </div>
@@ -106,26 +117,41 @@
         </div>
       </div>
       <div class="form-group row">
-        <label for="staticEmail" class="col-sm-4 col-form-label large">Wind direction and speed in km/h</label>
+        <label for="windspeed" class="col-sm-4 col-form-label large">Wind direction and speed in km/h</label>
         <div class="col-sm-4" id="windslider"></div>
         <div class="col-sm-4">
           <input type="number" class="form-control" id="windspeed" value="0.0" step="0.1" required>
         </div>
       </div>
       <div class="form-group row">
-        <label for="power" class="col-sm-4 col-form-label-lg">Target normalized power in W</label>
+        <label id="label_power" for="power" class="col-sm-4 col-form-label-lg">Target power in W</label>
         <div class="col-sm-8">
           <input type="number" class="form-control-lg" id="power" required>
         </div>
       </div>
+      <div class="form-group row">
+        <label id="label_power" for="wp0" class="col-sm-4">W' (a.k.a. Anaerobic Power Reserve, in kJ, only for W'bal model)</label>
+        <div class="col-sm-8">
+          <input type="number" class="form-control-lg" id="wp0" value="20.0" step="0.1" required>
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="select_type">Type</label>
+        <select class="form-control" id="select_optim_type">
+          <option value="np">Normalized Power</option>
+          <option value="wp_bal">W'bal model (Skiba et al., put CP as target power)</option>
+          <option value="constant_power">Constant power (do not optimize)</option>
+        </select>
       <div class="form-group form-check">
-        <input type="checkbox" class="form-check-input" id="constant_power">
-        <label class="form-check-label" for="constant_power">Constant power (do not optimize)</label>
+        <input type="checkbox" class="form-check-input" id="check_compare">
+        <label class="form-check-label" for="check_compare">Compare with selected segment effort (only for segment effort)</label>
       </div>
       <button class="btn btn-primary" id="submit_button">Compute optimal power</button>
     </form>
     <div class="container m-5" id="powerresult">
     </div>
+  </div>
+  <div id="tooltip" class="badge badge-light">
   </div>
 </body>
 
