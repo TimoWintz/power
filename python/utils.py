@@ -4,16 +4,19 @@ from stravalib import Client
 import googlemaps
 import json
 import os
-import ruptures as rpt
-from copy import deepcopy
+import gpxpy
+from gpxpy import gpx
+#import ruptures as rpt
+from copy import copy, deepcopy
 from scipy.optimize import bisect, least_squares, minimize, Bounds, NonlinearConstraint, shgo
 from pyowm import OWM
-
+import jax.lax as lax
 from jax import numpy as np
 from jax import grad, jit, jacfwd
 # again, this only works on startup!
 from jax.config import config
 config.update("jax_enable_x64", True)
+import pwlf
 
 
 class IGNAlti:
@@ -134,6 +137,7 @@ class Segment:
             else:
                 res.points[-1]["temp"] = 20
         res.has_gps = True
+        res.track_points = deepcopy(res.points)
         return res
 
     @staticmethod
@@ -158,62 +162,74 @@ def _total_time(lengths, speed):
 total_time_fn = jit(_total_time)
 g_total_time_fn = jit(grad(_total_time, 1))
 
-def _normalized_power(power_model_params, lengths, grades, headwind, altitude, temp, speed):
+def _speed_to_power(power_model_params, lengths, grades, headwind, altitude, temp, speed, wp0):
     power = []
     for i in range(len(speed)):
-        power.append(PowerModel.power_from_speed(power_model_params, grades[i],
-            speed[i], altitude[i], temp[i], headwind[i]))
+        p = PowerModel.power_from_speed(power_model_params, grades[i],
+            speed[i], altitude[i], temp[i], headwind[i])
+        if i > 0:
+            w = 1/2 * power_model_params[0] * (speed[i]**2 - speed[i-1]**2)
+            p += w * speed[i] / lengths[i]
+        power.append(p)
+    return power
+
+def _normalized_power(power_model_params, lengths, grades, headwind, altitude, temp, speed, wp0):
+    power = _speed_to_power(power_model_params, lengths, grades, headwind, altitude, temp, speed, wp0)
     power = np.array(power)
     t = lengths / speed
-    return (1 / np.sum(t) * np.sum( t * power**4 ) )**(1/4)
+    return (1 / np.sum(t) * np.sum( t * power**4 ) )**(1/4) - wp0 / np.sum(t)
 
 normalized_power_fn = jit(_normalized_power)
 g_normalized_power_fn = jit(grad(_normalized_power, 6))
 
-def _average_power(power_model_params, lengths, grades, headwind, altitude, temp, speed):
-    power = []
-    for i in range(len(speed)):
-        power.append(PowerModel.power_from_speed(power_model_params, grades[i],
-            speed[i], altitude[i], temp[i], headwind[i]))
+def _average_power(power_model_params, lengths, grades, headwind, altitude, temp, speed, wp0):
+    power = _speed_to_power(power_model_params, lengths, grades, headwind, altitude, temp, speed, wp0)
     power = np.array(power)
     t = lengths / speed
-    return (1 / np.sum(t) * np.sum( t * power ) )
+    return (1 / np.sum(t) * (np.sum( t * power ) - wp0))
 
 average_power_fn = jit(_average_power)
 g_average_power_fn = jit(grad(_average_power, 6))
 
 
 
-def _wp_exp(power_model_params, lengths, grades, headwind, altitude, temp, speed, ftp, wp0):
+def _wp_bal(power_model_params, lengths, grades, headwind, altitude, temp, speed, ftp, wp0):
     power = []
     for i in range(len(speed)):
         power.append(PowerModel.power_from_speed(power_model_params, grades[i],
             speed[i], altitude[i], temp[i], headwind[i]))
-    power = np.array(power)
-    dp_pos = np.maximum(power - ftp, 0)
-    dp_neg = np.minimum(power - ftp, 0)
-    #tau = 546 * np.exp(0.01 * dp_neg) + 316
-    rec_factor = dp_neg / wp0 # skiba 2015
-    dt = lengths / speed
-    Wp_exp = [0.0]
-    for i in range(len(speed)):
-        new_val = (Wp_exp[-1] + dt[i]*dp_pos[i]) * np.exp(rec_factor[i] * dt[i])
-        Wp_exp.append(new_val)
-    return np.array(Wp_exp[1:])
+    wpbal = [wp0]
+    durations = np.array(lengths / speed)
+    for i, p in enumerate(power):
+        deltaP = p - ftp
+        last_wpbal = wpbal[-1]
+        last_wpbal = last_wpbal - (deltaP >= 0) * durations[i] * deltaP + \
+            (deltaP <= 0) * (wp0 - last_wpbal) * (1 - np.exp(deltaP * durations[i] / wp0))
+        wpbal.append(last_wpbal)
+    return np.array(wpbal[1:])
 
-wp_exp_fn = jit(_wp_exp)
+wp_bal_fn = jit(_wp_bal)
 # wp_exp_fn = _wp_exp
-g_wp_exp_fn = jit(jacfwd(_wp_exp, 6))
+g_wp_bal_fn = jit(jacfwd(_wp_bal, 6))
 
-def optimal_power(power_model_params, lengths, grades, headwind, altitudes, temp, target_normalized_power,
+def optimal_power(power_model_params, lengths, grades, headwind, altitudes, temp, ftp,
     constant_power=False, constant_velocity=False, use_normalized=True, use_wp_bal=False, wp0=20000):
 
-    max_power = 4.0 * target_normalized_power
+    max_power = 4.0 * ftp
 
     if headwind is None:
         headwind = np.zeros(len(lengths))
     if temp is None:
         temp = np.zeros(len(lengths))
+
+    def bisect_fn(p):
+        v0 = np.array([PowerModel.speed_from_power(power_model_params, grades[i], p, altitudes[i], temp[i], headwind[i]) for i in range(len(grades))])
+        tp = average_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v0, wp0)
+        return tp - ftp
+    p = bisect(bisect_fn, ftp, max_power)
+    v0= onp.array([PowerModel.speed_from_power(power_model_params, grades[i], p, altitudes[i], temp[i], headwind[i]) for i in range(len(grades))])
+    if constant_power:
+        return v0
 
     f = lambda v : total_time_fn(lengths, v)
     gf = lambda v : g_total_time_fn(lengths, v)
@@ -225,47 +241,46 @@ def optimal_power(power_model_params, lengths, grades, headwind, altitudes, temp
     print("temp= ", temp)
 
     constraints = []
-    if use_normalized:
-        h = lambda v : normalized_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v)
-        gh = lambda v : g_normalized_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v)
-        constraints.append(NonlinearConstraint(h, jac=gh, lb=np.array([0]), ub=np.array([target_normalized_power])))
-    elif use_wp_bal:
-        h = lambda v : wp_exp_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v, target_normalized_power, wp0)
-        gh = lambda v : g_wp_exp_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v, target_normalized_power, wp0)
-        constraints.append(NonlinearConstraint(h, jac=gh, lb=np.array(len(lengths)*[0]), ub=np.array(len(lengths)*[wp0])))
+    if use_normalized or use_wp_bal:
+        h = lambda v : normalized_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v, wp0)
+        gh = lambda v : g_normalized_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v, wp0)
+        constraints.append(NonlinearConstraint(h, jac=gh, lb=np.array([0]), ub=np.array([ftp])))
     else:
-        h = lambda v : average_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v)
-        gh = lambda v : g_average_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v)
-        constraints.append(NonlinearConstraint(h, jac=gh, lb=np.array([0]), ub=np.array([target_normalized_power])))
+        h = lambda v : average_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v, wp0)
+        gh = lambda v : g_average_power_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v, wp0)
+        constraints.append(NonlinearConstraint(h, jac=gh, lb=np.array([0]), ub=np.array([ftp])))
+    if use_wp_bal:
+        constraints_wp = []
+        h_wp = lambda v : wp_bal_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v, ftp, wp0)
+        gh_wp = lambda v : g_wp_bal_fn(power_model_params, lengths, grades, headwind, altitudes, temp, v, ftp, wp0)
+        constraints_wp.append(NonlinearConstraint(h_wp, jac=gh_wp, lb=np.array(len(lengths)*[0]), ub=np.array(len(lengths)*[wp0])))
+   
 
     if constant_velocity:
         v = 5*np.ones(len(grades))
         eps = 0.001
-        while h(v) < target_normalized_power:
+        while h(v) < ftp:
             v *= (1+eps)
         return onp.array(v)
 
 
-    v0 = np.array([PowerModel.speed_from_power(power_model_params, grades[i], target_normalized_power, altitudes[i], temp[i], headwind[i]) for i in range(len(grades))])
-    print("v0 = ", v0)
-    if constant_power:
-        print("NP = ", h(v0))
-        return onp.array(v0)
-    if use_wp_bal:
-        v0 = 2*v0
-
-    lb = min_speed * np.ones(len(lengths))
+    
     ub = np.array([PowerModel.speed_from_power(power_model_params, grades[i], max_power, altitudes[i], temp[i], headwind[i]) for i in range(len(grades))])
+    lb = min_speed * np.ones(len(lengths))
+    lb = np.array([PowerModel.speed_from_power(power_model_params, grades[i], 100.0, altitudes[i], temp[i], headwind[i]) for i in range(len(grades))])
     bounds = Bounds(lb, ub)
 
-    print("fun = ", f(v0))
+
+
     r = minimize(fun=f, jac=gf, x0=v0, constraints=constraints, bounds=bounds)
     if not r.success:
         r = minimize(fun=f, jac=gf, x0=v0, constraints=constraints, bounds=bounds, method="trust-constr")
-    print("fun = ", f(r.x))
-    print("OPTIM RESULT")
-    print(r)
-    print("constraint = ", h(r.x))
+
+    if use_wp_bal:
+        print("WLBAL")
+        print(h_wp(r.x))
+        r = minimize(fun=f, jac=gf, x0=np.array(r.x), constraints=constraints_wp, bounds=bounds)
+        print(h_wp(r.x))
 
     return r.x
 
@@ -349,7 +364,7 @@ class Profile:
             interval["headwind"] = headwind[i]
         self.has_wind = True
 
-    def optimal_power(self, power_model_params, target_normalized_power,
+    def optimal_power(self, power_model_params, ftp,
                 optim_type="np", wp0=20000):
         assert(len(power_model_params) == 4)
         print("params = ", power_model_params)
@@ -379,16 +394,26 @@ class Profile:
         else:
             raise Exception("Unknown optimization type")
 
-        speed = optimal_power(power_model_params, lengths, grades, headwind, altitudes, temps, target_normalized_power,
+        speed = optimal_power(power_model_params, lengths, grades, headwind, altitudes, temps, ftp,
             constant_power=constant_power, constant_velocity=constant_velocity, use_normalized=use_normalized, use_wp_bal=use_wp_bal, wp0=wp0)
-        return {"normalized_power" : float(normalized_power_fn(power_model_params, lengths, grades, headwind, altitudes, temps, speed)),
+        return {"normalized_power" : float(normalized_power_fn(power_model_params, lengths, grades, headwind, altitudes, temps, speed, 0)),
                 "intervals" : self.intervals_from_speed(power_model_params, speed=speed)}
 
     def regularize(self, pen=10, key="grade"):
-        values = np.array([x[key] for x in self.intervals])
-        algo = rpt.Pelt(model="rbf").fit(values)
-        self.indices = algo.predict(pen=pen)
-        self.indices.insert(0,0)
+        pen = int(pen)
+        dist = np.array([x["distance"] for x in self.intervals])
+        alti = np.array([x["altitude"] for x in self.intervals])
+        my_pwlf = pwlf.PiecewiseLinFit(dist, alti)
+        fit = my_pwlf.fitfast(pen, pop=4)
+        i0=0
+        self.indices=[i0]
+        for b in fit[1:]:
+            while b > dist[i0]:
+                i0+=1
+            if i0 > self.indices[-1]:
+                self.indices.append(i0)
+        self.indices[-1] = len(dist)
+        
         self.intervals = [self._interval_indices(self.indices[i], self.indices[i+1]) for i in range(len(self.indices) - 1)]
         self.points= [self.points[i] for i in self.indices]
         self.update()
@@ -419,6 +444,11 @@ class Profile:
             result[i]["time"] = prev_t + result[i]["duration"]
             result[i]["average_kmh"] = result[i]["distance"] / result[i]["time"] * 3.6
         return result
+
+    def gpx_from_speed(self, speed):
+        gpxfile = gpx.GPX()
+        while True:
+            pt = gpx.GPXTrackPoint()
 
 def angle_from_coordinates(lat1, lng1, lat2, lng2):
     dlng = lng2 - lng1
