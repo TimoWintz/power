@@ -1,4 +1,4 @@
-FROM tiangolo/uwsgi-nginx:python3.8
+FROM tiangolo/uwsgi-nginx:python3.10
 RUN useradd -ms /bin/bash power
 ENV PATH=${HOME}/.local/bin:${PATH}
 COPY python/requirements.txt /app/
