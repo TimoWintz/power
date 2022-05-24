@@ -1,0 +1,6 @@
+[submodule "thirdparty/optim"]
+	path = thirdparty/optim
+	url = https://github.com/kthohr/optim
+[submodule "thirdparty/autodiff"]
+	path = thirdparty/autodiff
+	url = https://github.com/autodiff/autodiff

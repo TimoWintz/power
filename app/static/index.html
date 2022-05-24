@@ -3,7 +3,7 @@
 
 <head>
   <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
-  <title>Strava Segment Power Optimization</title>
+  <title>Optimisation de segment</title>
   <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.10.2/jquery.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.12.9/umd/popper.min.js"
     integrity="sha384-ApNbgh9B+Y1QKtv3Rn7W3mgPxhU9K/ScQsAP7hUibX39j7fakFPskvXusvfa0b4Q"
@@ -32,11 +32,13 @@
     <ul class="navbar-nav">
 
       <li class="nav-item active">
-        <a class="nav-link" href="">Power optimization</a>
+        <a class="nav-link" href="">Puissance optimale</a>
       </li>
+      <!--
       <li class="nav-item">
         <a class="nav-link" href="parameters.html">Parameters estimation</a>
       </li>
+      -->
     </ul>
   </nav>
   <div class="container" id="auth">
@@ -44,34 +46,38 @@
   </div>
   <div class="container" id="main">
 
-    <h1> Optimal power </h1>
+    <h1>Puissance optimale</h1>
     <form id="profileform">
-      <div class="form-group">
-        <label for="exampleInputEmail1">Segment ID</label>
-        <input type="text" class="form-control" id="segmentid" aria-describedby="idhelp" required>
-        <small id="idhelp" class="form-text text-muted">The segment ID is the number at the end of the adress when you
-          are on a segment detail page (e.g https://www.strava.com/segments/18593287 -&gt; ID = 18593287)</small>
-      </div>
+
       <div class="form-group">
         <label for="select_type">Type</label>
-      <select class="form-control" id="select_type">
-        <option value="segment">Segment</option>
-        <option value="effort">Segment effort</option>
-      </select>
-    </div>
-   
-      <label for="range">Number of subdivisions</label>
-      <input type="range" class="custom-range" min="1" max="20" step="1" default="3" id="pen" required>
+        <select class="form-control" id="select_type">
+          <option value="segment">Segment</option>
+          <option value="effort">Effort</option>
+          <option value="route">Itinéraire</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="exampleInputEmail1">Identifiant</label>
+        <input type="text" class="form-control" id="segmentid" aria-describedby="idhelp" required>
+        <small id="idhelp" class="form-text text-muted">L'identifiant est le nombre apparaissant
+          à la fin de l'adresse sur Strava (par ex. pour un segment https://www.strava.com/segments/18593287 -&gt; ID =
+          18593287)</small>
+      </div>
+
+      <label for="range">Nombre de sous-segments</label>
+      <div class="form-group row">
+        <input type="range" class="col-sm-10 custom-range" min="1" max="12" step="1" default="5" id="pen"
+          oninput="this.nextElementSibling.value = this.value" required>
+        <output class="col-sm-2">5</output>
+      </div>
       <div class="form-group form-check">
         <input type="checkbox" class="form-check-input" id="correctalt">
-        <label class="form-check-label" for="correctalt">Correct altitude (only available in France, uses IGN
-          data)</label>
+        <label class="form-check-label" for="correctalt">Corriger l'altitude (en France uniquement) <b
+            class="font-italic small">Attention, cette
+            option est lente sur des segments longs !</b></label>
       </div>
-      <div class="form-group form-check">
-        <input type="checkbox" class="form-check-input" id="snaptoroads">
-        <label class="form-check-label" for="snaptoroads">Snap to roads (uses Google API)</label>
-      </div>
-      <button class="btn btn-primary" id="submit_profile">View profile</button>
+      <button class="btn btn-primary" id="submit_profile">Calculer le profil</button>
     </form>
     <div class="container">
       <h2 class="container m-5" id="profilename">
@@ -87,66 +93,61 @@
     </h2>
     <form id="powerform">
       <div class="form-group row">
-        <label for="mass" class="col-sm-4 col-form-label">Total mass (rider + bike + ...) in kg</label>
+        <label for="mass" class="col-sm-4 col-form-label">Masse totale en kg (vélo, coureur, accessoires...)</label>
         <div class="col-sm-8">
           <input type="number" class="form-control" id="mass" value="75" step="0.1" required>
         </div>
       </div>
       <div class="form-group row">
-        <label for="efficiency" class="col-sm-4 col-form-label">Drivetrain efficiency (0.95-0.98)</label>
+        <label for="efficiency" class="col-sm-4 col-form-label">Efficacité de la transmission (entre 0 et 1)</label>
         <div class="col-sm-8">
           <input type="number" class="form-control" id="efficiency" value="0.98" step="0.001" required>
         </div>
       </div>
       <div class="form-group row">
-        <label for="cda" class="col-sm-4 col-form-label">Air drag coefficient (Cda) in m&Acirc;&sup2;</label>
+        <label for="cda" class="col-sm-4 col-form-label">Coefficient de résistance à l'air (CdA)</label>
         <div class="col-sm-8">
           <input type="number" class="form-control" id="cda" value="0.3" step="0.01" required>
         </div>
       </div>
       <div class="form-group row">
-        <label for="cr" class="col-sm-4 col-form-label">Rolling resistance coefficient (Cr)</label>
+        <label for="cr" class="col-sm-4 col-form-label">Coefficient de résistance au roulement (Crr)</label>
         <div class="col-sm-8">
-          <input type="number" class="form-control" id="cr" value="0.003" step="0.0001" required>
+          <input type="number" class="form-control" id="cr" value="0.004" step="0.0001" required>
         </div>
       </div>
       <div class="form-group row">
-        <label for="temp" class="col-sm-4 col-form-label large">Temperature (°C)</label>
+        <label for="temp" class="col-sm-4 col-form-label large">Température (°C)</label>
         <div class="col-sm-8">
           <input type="number" class="form-control" id="temp" value="20" required>
         </div>
       </div>
       <div class="form-group row">
-        <label for="windspeed" class="col-sm-4 col-form-label large">Wind direction and speed in km/h</label>
+        <label for="windspeed" class="col-sm-4 col-form-label large">Force et direction du vent en km/h</label>
         <div class="col-sm-4" id="windslider"></div>
         <div class="col-sm-4">
           <input type="number" class="form-control" id="windspeed" value="0.0" step="0.1" required>
         </div>
       </div>
       <div class="form-group row">
-        <label id="label_power" for="power" class="col-sm-4 col-form-label-lg">FTP in W</label>
+        <label id="label_power" for="power" class="col-sm-4 col-form-label-lg">Puissance critique en W (FTP)</label>
         <div class="col-sm-8">
-          <input type="number" class="form-control-lg" id="power" required>
+          <input type="number" class="form-control-lg" id="power" value="300.0" required>
         </div>
       </div>
       <div class="form-group row">
-        <label id="label_power" for="wp0" class="col-sm-4">Anaerobic Power Reserve, in kJ</label>
+        <label id="label_power" for="wp0" class="col-sm-4">Réserve anaérobique en kJ</label>
         <div class="col-sm-8">
           <input type="number" class="form-control-lg" id="wp0" value="20.0" step="0.1" required>
         </div>
       </div>
       <div class="form-group">
-        <label for="select_type">Type</label>
-        <select class="form-control" id="select_optim_type">
-          <option value="np">Normalized Power</option>
-          <option value="wp_bal">W'bal model (Skiba et al., put CP as target power)</option>
-          <option value="constant_power">Constant power (do not optimize)</option>
-        </select>
-      <div class="form-group form-check">
-        <input type="checkbox" class="form-check-input" id="check_compare">
-        <label class="form-check-label" for="check_compare">Compare with selected segment effort (only for segment effort)</label>
-      </div>
-      <button class="btn btn-primary" id="submit_button">Compute optimal power</button>
+        <!-- Links
+        <div class="form-group form-check">
+          <input type="checkbox" class="form-check-input" id="check_compare">
+          <label class="form-check-label" for="check_compare">Comparer avec l'effort</label>
+        </div>-->
+        <button class="btn btn-primary" id="submit_button">Calculer la puissance optimale</button>
     </form>
     <div class="container m-5" id="powerresult">
     </div>

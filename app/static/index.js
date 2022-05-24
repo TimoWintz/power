@@ -6,7 +6,7 @@ function project_web_mercator(lng, lat) {
     lat = Math.PI * lat / 180;
     lng = Math.PI * lng / 180;
     xPos = lng + Math.PI;
-    yPos = Math.log(Math.tan(Math.PI/4 + lat / 2));
+    yPos = Math.log(Math.tan(Math.PI / 4 + lat / 2));
     return [xPos, yPos];
 }
 
@@ -31,7 +31,7 @@ function profile(event) {
         $("#profilename").html(data["segment_name"]);
         var d1 = []
         for (var i = 0; i < data["segment_points"].length; i++) {
-            var lastPoint = [Number.parseFloat(data["segment_points"][i]["distance"]/1000), Number.parseFloat(data["segment_points"][i]["alt"])];
+            var lastPoint = [Number.parseFloat(data["segment_points"][i]["distance"] / 1000), Number.parseFloat(data["segment_points"][i]["alt"])];
             d1.push(lastPoint);
         }
         var plotdata = [
@@ -46,17 +46,17 @@ function profile(event) {
             },
             xaxis: {
 
-                
+
             },
-            grid:{autoHighlight:false, hoverable:true, clickable:false, axisMargin:10, borderWidth:0}
+            grid: { autoHighlight: false, hoverable: true, clickable: false, axisMargin: 10, borderWidth: 0 }
         };
-        
+
         for (var i = 0; i < data["profile_points"].length - 1; i++) {
             d3 = []
-            d3.push([Number.parseFloat(data["profile_points"][i]["distance"]/1000), 0]);
-            d3.push([Number.parseFloat(data["profile_points"][i]["distance"]/1000), Number.parseFloat(data["profile_points"][i]["alt"])]);
-            d3.push([Number.parseFloat(data["profile_points"][i + 1]["distance"]/1000), Number.parseFloat(data["profile_points"][i + 1]["alt"])]);
-            d3.push([Number.parseFloat(data["profile_points"][i + 1]["distance"]/1000), 0]);
+            d3.push([Number.parseFloat(data["profile_points"][i]["distance"] / 1000), 0]);
+            d3.push([Number.parseFloat(data["profile_points"][i]["distance"] / 1000), Number.parseFloat(data["profile_points"][i]["alt"])]);
+            d3.push([Number.parseFloat(data["profile_points"][i + 1]["distance"] / 1000), Number.parseFloat(data["profile_points"][i + 1]["alt"])]);
+            d3.push([Number.parseFloat(data["profile_points"][i + 1]["distance"] / 1000), 0]);
             color = Number.parseFloat(data["profile_intervals"][i]["grade"]) / 20 + 0.5;
             label = Number.parseFloat(data["profile_intervals"][i]["grade"]).toFixed(1) + "%";
             plotdata.push({
@@ -66,31 +66,31 @@ function profile(event) {
                 points: { show: false },
                 color: colormap(color)
             });
-            
+
         }
-        
+
         $.plot("#profileresult", plotdata, options);
-        
+
 
         $("#profileresult").bind("plothover", function (event, pos, item) {
             $("#tooltip").show();
-            $("#tooltip").css({top: pos.pageY - 30, left: pos.pageX});
+            $("#tooltip").css({ top: pos.pageY - 30, left: pos.pageX });
             for (var i = 1; i < profile_data["profile_points"].length; i++) {
-                if (profile_data["profile_points"][i]["distance"]/1000 > pos.x) {
-                    $("#tooltip").html((profile_data["profile_intervals"][i-1]["length"]/1000).toFixed(1) + "km at " + profile_data["profile_intervals"][i-1]["grade"].toFixed(1) + "%");
+                if (profile_data["profile_points"][i]["distance"] / 1000 > pos.x) {
+                    $("#tooltip").html((profile_data["profile_intervals"][i - 1]["length"] / 1000).toFixed(1) + "km at " + profile_data["profile_intervals"][i - 1]["grade"].toFixed(1) + "%");
                     break;
                 }
-                
+
             }
-                
+
         });
-        $("#profileresult").mouseleave(function () {  $("#tooltip").hide(); });
+        $("#profileresult").mouseleave(function () { $("#tooltip").hide(); });
         var d4 = []
         var map_plotdata = []
         lastPoint = null;
         for (var i = 0; i < data["profile_points"].length - 1; i++) {
             d4 = []
-            if(lastPoint) {
+            if (lastPoint) {
                 d4.push(lastPoint);
             }
             color = Number.parseFloat(data["profile_intervals"][i]["grade"]) / 20 + 0.5;
@@ -116,12 +116,12 @@ function profile(event) {
         lat = data["segment_points"][0]["lat"];
         lng = data["segment_points"][0]["lng"];
         var xy = project_web_mercator(lng, lat);
-        
+
         d5.push(xy);
         map_plotdata.push({
             data: d5,
             lines: { show: true, fill: false },
-            points: { show: true , radius: 10},
+            points: { show: true, radius: 10 },
             color: "green"
         });
 
@@ -133,23 +133,23 @@ function profile(event) {
         map_plotdata.push({
             data: d6,
             lines: { show: true, fill: false },
-            points: { show: true , radius: 10},
+            points: { show: true, radius: 10 },
             color: "red"
         });
 
 
 
 
-        options = { legend: { show: false }, xaxis: { show: false }, yaxis: { show: false }, grid:{autoHighlight:false, hoverable:true, clickable:false, axisMargin:10, borderWidth:0}};
+        options = { legend: { show: false }, xaxis: { show: false }, yaxis: { show: false }, grid: { autoHighlight: false, hoverable: true, clickable: false, axisMargin: 10, borderWidth: 0 } };
 
         $("#profilemap").html("");
-        var  plot = $.plot("#profilemap", map_plotdata, options);
+        var plot = $.plot("#profilemap", map_plotdata, options);
         var opts = plot.getOptions();
         console.log(opts);
         opts.xaxes[0].max = opts.xaxes[0].min + (opts.yaxes[0].max - opts.yaxes[0].min) * $('#profilemap').width() / $('#profilemap').height();
         plot.setupGrid();
         plot.draw();
-  
+
         $("#powerform").show()
     })
         .fail(function () {
@@ -178,7 +178,7 @@ $(document).ready(function () {
     $("#powerform").submit(function (event) {
         profile(event);
         event.preventDefault();
-        var compare = $("#select_type").val() == "effort" &&  $("#check_compare").is(":checked");
+        var compare = $("#select_type").val() == "effort" && $("#check_compare").is(":checked");
         $("#powerresult").html('<div class="spinner-border m-5" role="status"> <span class="sr-only">Loading...</span> </div>');
         url = root + "/api/optimal_power" + "?mass=" + String($("#mass").val()) + "&power=" + String($("#power").val()) +
             "&id=" + String($("#segmentid").val()) + "&Cda=" + String($("#cda").val()) +
@@ -196,14 +196,14 @@ $(document).ready(function () {
         $.getJSON(url, function (data) {
             var items = [];
             html = '<table class="table-striped"><thead class="thead-dark m-5"> <tr>' +
-                '<th scope="col">Distance (km)</th>' +
-                '<th scope="col">Length (km)</th> <th scope="col">Elevation (m)</th>' +
-                '<th scope="col">Time</th>' +
-                '<th scope="col">Grade (%)</th>' +
-                '<th scope="col">Power (W)</th>' +
-                '<th scope="col">Speed (km/h)</th>' +
-                '<th scope="col">Average (km/h)</th>' +
-                '<th scope="col">Headwind (km/h)</th>' +
+                '<th scope="col">Distance totale (km)</th>' +
+                '<th scope="col">Longueur (km)</th> <th scope="col">Dénivelé positif (m)</th>' +
+                '<th scope="col">Temps total</th>' +
+                '<th scope="col">Pente (%)</th>' +
+                '<th scope="col">Puissance cible (W)</th>' +
+                '<th scope="col">Vitesse cible (km/h)</th>' +
+                '<th scope="col">Vitesse moyenne (km/h)</th>' +
+                '<th scope="col">W\'bal (kJ)</th > ' +
                 '</tr> </thead>';
             var idx = 0;
             $.each(data["intervals"], function (key, val) {
@@ -216,10 +216,10 @@ $(document).ready(function () {
                     ' </td><td>' + Number.parseFloat(val['total_elevation']).toFixed(1) +
                     ' </td><td>' + timeString +
                     ' </td><td>' + Number.parseFloat(val['grade']).toFixed(1) +
-                    ' </td><td>' + Number.parseFloat(val['est_power']).toFixed(1) +
-                    ' </td><td>' + Number.parseFloat(val['speed_kmh']).toFixed(1) +
-                    ' </td><td>' + Number.parseFloat(val['average_kmh']).toFixed(1) +
-                    ' </td><td>' + (Number.parseFloat(val['headwind'])*3.6).toFixed(1) +
+                    ' </td><td>' + Number.parseFloat(val['est_power']).toFixed(0) +
+                    ' </td><td>' + Number.parseFloat(val['speed'] * 3.6).toFixed(1) +
+                    ' </td><td>' + Number.parseFloat(val['average_speed'] * 3.6).toFixed(1) +
+                    ' </td><td>' + (Number.parseFloat(val['wp_bal'] * 0.001)).toFixed(1) +
                     '</td></tr>');
                 if (compare) {
                     var val = profile_data["profile_intervals"][idx];
@@ -234,16 +234,16 @@ $(document).ready(function () {
                     }
                     var timeString_effort = date_effort.toISOString().substr(11, 8);
                     idx++;
-                    items.push('<tr><th scope="row"> '+
-                    ' </th><td>' + 
-                    ' </td><td>Compared:' +
-                    ' </td><td>' + timeString_effort + 
-                    ' </td><td>' + '(' + dt + 's)' +
-                    ' </td><td>' + Number.parseFloat(val['est_power']).toFixed(1) +
-                    ' </td><td>' + Number.parseFloat(val['speed_kmh']).toFixed(1) +
-                    ' </td><td>' + Number.parseFloat(val['average_kmh']).toFixed(1) +
-                    ' </td><td>' +
-                    '</td></tr>');
+                    items.push('<tr><th scope="row"> ' +
+                        ' </th><td>' +
+                        ' </td><td>Compared:' +
+                        ' </td><td>' + timeString_effort +
+                        ' </td><td>' + '(' + dt + 's)' +
+                        ' </td><td>' + Number.parseFloat(val['est_power']).toFixed(1) +
+                        ' </td><td>' + Number.parseFloat(val['speed'] * 3.6).toFixed(1) +
+                        ' </td><td>' + Number.parseFloat(val['average_speed'] * 3.6).toFixed(1) +
+                        ' </td><td>' +
+                        '</td></tr>');
                 }
             });
             $("#powerresult").html(

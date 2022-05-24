@@ -2,51 +2,44 @@
 from flask import render_template, request, redirect, make_response, session, send_from_directory
 from flask import Flask
 from stravalib import Client
-import auth
+from opt_power import auth, utils
 import os
 import time
 from flask_restful import Resource, Api
 from flask_restful import reqparse
 from flask_cors import CORS
-import flask
 import logging
 import shelve
-from threading import Lock
-# from uwsgidecorators import *
-# from shared_memory_dict import SharedMemoryDict
 
-import utils
 
 app = Flask(__name__)
 app.secret_key = 'blablabla'
 api = Api(app)
 cors = CORS(app)
-
-#mycache = SharedMemoryDict(name='segments', size=1000000)
+# mycache = SharedMemoryDict(name='segments', size=1000000)
 # print("cache = ", list(mycache.keys()))
 logger = logging.getLogger(__name__)
 
-# @lock
+#
+TMP_FILE = "/tmp/puissance"
 
-mutex = Lock()
+
+def setup_cache():
+    mycache = shelve.open(TMP_FILE, 'c')
+    mycache.close()
+
 
 def read_cache(key):
-    mutex.acquire()
-    mycache = shelve.open('/home/twintz/tmp/puissance', 'r')
+    mycache = shelve.open(TMP_FILE, 'r')
     val = mycache.get(key, None)
     mycache.close()
-    mutex.release()
     return val
-
-# @lock
 
 
 def write_cache(key, val):
-    mutex.acquire()
-    mycache = shelve.open('/home/twintz/tmp/puissance', 'w')
+    mycache = shelve.open(TMP_FILE, 'w')
     mycache[key] = val
     mycache.close()
-    mutex.release()
 
 
 use_ign = False
@@ -71,7 +64,7 @@ def main():
         client = Client(access_token=session['access_token'])
         athlete = client.get_athlete()
         print(athlete)
-        return send_from_directory('static', 'index.html')
+        return redirect('/index.html')
 
     except:
         with open('strava_secrets.txt') as f:
@@ -80,7 +73,7 @@ def main():
         access_token = auth.get_token(client_id, client_secret)
         if access_token == None:
             return auth.redirect_auth(client_id)
-        return redirect('/')
+        return redirect('/index.html')
 
 
 class Auth(Resource):
@@ -98,13 +91,13 @@ api.add_resource(Auth, "/api/auth")
 
 @app.route('/')
 def index():
-    return send_from_directory('static', 'index.html')
+    return redirect("/index.html")
 
 
 segment_parser = reqparse.RequestParser()
 segment_parser.add_argument(
-    'type', type=str, help='Type (segment or effort)', default="segment",location='args')
-segment_parser.add_argument('id', type=int, help='Segment id',location='args')
+    'type', type=str, help='Type (segment or effort)', default="segment", location='args')
+segment_parser.add_argument('id', type=int, help='Segment id', location='args')
 segment_parser.add_argument('use_ign', type=int, default=0, location='args')
 segment_parser.add_argument('use_gmaps', type=int, default=0, location='args')
 
@@ -130,7 +123,10 @@ pm_parser.add_argument(
     'temp', type=float, help='Temperature (C)', default=20.00, location='args')
 pm_parser.add_argument('optim_type', type=str, location='args',
                        help='Type of optimization', default='np')
-pm_parser.add_argument('wp0', type=float, help='Wp', default=20.0, location='args')
+pm_parser.add_argument('wp0', type=float, help='Wp',
+                       default=20.0, location='args')
+pm_parser.add_argument('power', type=float, help='threshold power',
+                       default=270.0, location='args')
 
 
 def get_segment(args):
@@ -147,10 +143,15 @@ def get_segment(args):
         elif args["type"] == "effort":
             segment = utils.Segment.from_strava_effort(
                 session['access_token'], id)
+        elif args["type"] == "activity":
+            segment = utils.Segment.from_strava_activity(
+                session['access_token'], id)
+        elif args["type"] == "route":
+            segment = utils.Segment.from_strava_route(
+                session['access_token'], id)
+
         if args["use_ign"]:
-            segment.correct_elevation(ign_secrets)
-        if args["use_gmaps"]:
-            segment.snap_to_roads(gmaps_secrets)
+            segment.correct_elevation()
         write_cache(desc, segment)
     elapsed = (time.time()-start)
     logger.info("Got segment in {}".format(elapsed))
@@ -167,17 +168,11 @@ def get_profile(segment_args, profile_args):
     if profile is None:
         segment = get_segment(segment_args)
         profile = utils.Profile(segment)
-        profile.regularize(profile_args['pen'], profile_args['key'])
+        profile.regularize(profile_args['pen'])
         write_cache(profile_desc, profile)
     elapsed = (time.time()-start)
     logger.info("Got profile in {}".format(elapsed))
     return profile
-
-
-opt_parser = reqparse.RequestParser()
-opt_parser.add_argument('power', type=float, help='Nominal power', location='args')
-opt_parser.add_argument(
-    'format', type=str, default="json", help='Nominal power', location='args')
 
 
 class OptimalPower(Resource):
@@ -186,15 +181,12 @@ class OptimalPower(Resource):
         profile_args = profile_parser.parse_args()
         profile = get_profile(segment_args, profile_args)
         pm_args = pm_parser.parse_args()
-        power_model = [
-            pm_args["mass"], pm_args["drivetrain_efficiency"], pm_args["Cda"], pm_args["Cr"]]
-        opt_args = opt_parser.parse_args()
         start = time.time()
         if pm_args["wind_speed"] > 0:
             profile.add_wind(pm_args["wind_speed"], pm_args["wind_direction"])
         profile.set_temp(pm_args["temp"])
         r = profile.optimal_power(
-            power_model, ftp=opt_args["power"], optim_type=pm_args["optim_type"], wp0=1000*pm_args["wp0"])
+            pm_args["mass"], pm_args["drivetrain_efficiency"], pm_args["Cda"],  pm_args["Cr"], pm_args["power"], 1000 * pm_args["wp0"])
         elapsed = (time.time()-start)
         logger.info("Got optimal power in {}".format(elapsed))
         return r
@@ -259,10 +251,12 @@ class EstimateParameters(Resource):
 api.add_resource(EstimateParameters, "/api/parameters")
 
 
-@app.route('/<path:path>')
+@ app.route('/<path:path>')
 def send_js(path):
     return send_from_directory('static', path)
 
+
+setup_cache()
 
 if __name__ == "__main__":
     app.run(debug=True)

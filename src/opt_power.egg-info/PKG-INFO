@@ -1,0 +1,13 @@
+Metadata-Version: 2.1
+Name: opt-power
+Version: 0.0.1
+Summary: a minimal example package (with pybind11)
+Home-page: UNKNOWN
+Author: Henry Schreiner
+License: MIT
+Platform: UNKNOWN
+Requires-Python: >=3.6
+Provides-Extra: test
+
+UNKNOWN
+
